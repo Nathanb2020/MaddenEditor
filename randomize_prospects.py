@@ -10,7 +10,8 @@ What it touches (draft prospects only, ContractStatus == 'Draft'):
   - Weight for HB, TE, EDGE, and LB only, based on the new speed rating and height
 
 What it does NOT touch: other positions' weights, heights, draft order/ranks, dev traits,
-FB/K/P/LS prospects, anyone who is not a draft prospect.
+K/P/LS ratings, or anyone who is not a draft prospect. Fullback ratings are randomized
+inside the normal rating window because the source document provides no FB-specific ranges.
 
 Usage:
   python randomize_prospects.py [SAVE] [--output PATH] [--seed N] [--dry-run]
@@ -72,13 +73,13 @@ FIRST_ROUND_QB_FLOOR = {"ThrowAccuracyShortRating": 70, "ThrowAccuracyMidRating"
 
 # position -> group
 GROUP_OF = {
-    "QB": "QB", "HB": "HB", "WR": "WR", "TE": "TE",
+    "QB": "QB", "HB": "HB", "FB": "FB", "WR": "WR", "TE": "TE",
     "LT": "OL", "LG": "OL", "C": "OL", "RG": "OL", "RT": "OL",
     "DT": "DT", "LE": "EDGE", "RE": "EDGE",
     "MLB": "LB", "LOLB": "LB", "ROLB": "LB",
     "CB": "CB", "FS": "S", "SS": "S",
 }
-OFFENSE_GROUPS = {"QB", "HB", "WR", "TE", "OL"}
+OFFENSE_GROUPS = {"QB", "HB", "FB", "WR", "TE", "OL"}
 
 # (min, max) per group. The bell curve spans the range: the floor and ceiling
 # are the two tails of the curve (nothing is piled up on them).
@@ -90,7 +91,8 @@ RANGES = {
         "SpeedRating": (82, 99), "AccelerationRating": (82, 99),
         "AwarenessRating": (59, 76),
     },
-    "HB": {"SpeedRating": (86, 99)},
+    "HB": {"SpeedRating": (85, 99), "AccelerationRating": (85, 99),
+           "CarryingRating": (75, 99)},
     "TE": {"SpeedRating": (78, 94)},
     "WR": {"SpeedRating": (88, 99)},
     "OL": {
@@ -107,12 +109,16 @@ RANGES = {
              "BlockSheddingRating": (75, 88), "FinesseMovesRating": (60, 75),
              "PowerMovesRating": (60, 75)},
     "LB": {"SpeedRating": (84, 93), "AccelerationRating": (84, 96),
-           "PlayRecognitionRating": (70, 90), "PursuitRating": (75, 99)},
+           "PlayRecognitionRating": (70, 90), "PursuitRating": (75, 99),
+           "ChangeOfDirectionRating": (75, 93), "ManCoverageRating": (60, 70),
+           "ZoneCoverageRating": (65, 80)},
     "CB": {"SpeedRating": (89, 99), "AccelerationRating": (89, 99),
            "ChangeOfDirectionRating": (89, 99), "ManCoverageRating": (70, 85),
            "ZoneCoverageRating": (70, 85), "PressRating": (70, 85)},
     "S": {"SpeedRating": (89, 99), "AccelerationRating": (89, 99),
-          "PlayRecognitionRating": (70, 90), "PursuitRating": (75, 99)},
+          "ChangeOfDirectionRating": (85, 99), "PlayRecognitionRating": (70, 90),
+          "PursuitRating": (75, 99), "ManCoverageRating": (65, 85),
+          "ZoneCoverageRating": (65, 85)},
 }
 
 # (group, attribute) -> target mean for the right-skewed bell curve.
@@ -454,7 +460,7 @@ def main():
     prospects = [p for p in players if p.get("ContractStatus") == "Draft"]
     targets = [p for p in prospects if p["Position"] in GROUP_OF]
     skipped = [p for p in prospects if p["Position"] not in GROUP_OF]
-    print("\nDraft prospects: %d (editing %d; leaving %d FB/K/P/LS untouched)" %
+    print("\nDraft prospects: %d (editing %d; leaving %d K/P/LS untouched)" %
           (len(prospects), len(targets), len(skipped)))
 
     ol_weights = [p.get("Weight", 0) for p in targets if GROUP_OF[p["Position"]] == "OL"]
@@ -523,7 +529,8 @@ def main():
                 new[attr] = predict(m, new)
 
         full = {**{k: p[k] for k in rating_keys}, **new}
-        new_ovr = predict(models[p["Position"]], full)
+        new_ovr = (predict(models[p["Position"]], full)
+                   if p["Position"] in models else p["OverallRating"])
         changes = {k: v for k, v in new.items() if v != p[k]}
         for attr, v in new.items():                       # Original twins
             tw = "Original" + attr

@@ -16,3 +16,7 @@ edits.json
 edits_heights.json
 stage1_preview.csv
 heights_preview.csv
+DraftClass-Scouting-Report*.csv
+draft_class_before.json
+draft_class_after.json
+draft_order_edits.json

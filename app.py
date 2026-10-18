@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import random
 import shutil
 import subprocess
 import sys
@@ -78,8 +79,9 @@ class DraftClassApp:
 
         ttk.Label(
             frame,
-            text="This runs the ratings/weight stage followed by QB/WR height randomization. "
-                 "Draft-order updates are not included yet.",
+            text="This randomizes prospect ratings and physical profiles, re-ranks the class from "
+                 "position-specific scouting scores and the requested round-by-round position mix, "
+                 "and writes a scouting report beside the new save.",
             wraplength=650,
         ).pack(anchor="w", pady=(10, 0))
 
@@ -238,7 +240,9 @@ class DraftClassApp:
             missing.append("NumPy is missing. Install it with: python -m pip install -r requirements.txt")
         if not (APP_DIR / "node_modules" / "madden-franchise").exists():
             missing.append("The Madden franchise package is missing. Install it with: npm install")
-        for script in ("randomize_prospects.py", "randomize_heights.py", "export.mjs", "apply.mjs"):
+        for script in ("randomize_prospects.py", "randomize_heights.py", "rank_draft_class.py",
+                       "export.mjs", "apply.mjs", "export_draft_class.mjs", "apply_draft_order.mjs",
+                       "college_programs.json"):
             if not (APP_DIR / script).is_file():
                 missing.append(f"Required app file is missing: {script}")
         return "\n\n".join(missing) or None
@@ -247,24 +251,32 @@ class DraftClassApp:
         try:
             with tempfile.TemporaryDirectory(prefix="madden-draftclass-") as work_dir:
                 stage1 = Path(work_dir) / "Stage1"
+                stage2 = Path(work_dir) / "Stage2"
                 completed_save = Path(work_dir) / "DraftClass"
+                report_path = Path(work_dir) / "ScoutingReport.csv"
+                seed = random.SystemRandom().randrange(1, 10 ** 9)
+                self.events.put(("log", f"Randomization seed: {seed}"))
                 commands = [
-                    ("Randomizing ratings and mapped weights…", "randomize_prospects.py", source, stage1),
-                    ("Randomizing QB and WR heights…", "randomize_heights.py", stage1, completed_save),
+                    ("Randomizing ratings and mapped weights…", "randomize_prospects.py", source, stage1,
+                     ["--seed", str(seed)]),
+                    ("Randomizing QB and WR heights…", "randomize_heights.py", stage1, stage2,
+                     ["--seed", str(seed ^ 0x45A9)]),
+                    ("Scoring prospects and writing the new draft order…", "rank_draft_class.py", stage2,
+                     completed_save, ["--seed", str(seed ^ 0x61C3), "--report", str(report_path)]),
                 ]
                 frozen = getattr(sys, "frozen", False)
-                for index, (label, script_name, input_save, output_save) in enumerate(commands, start=1):
+                for index, (label, script_name, input_save, output_save, extra_args) in enumerate(commands, start=1):
                     self.events.put(("log", label))
                     if frozen:
                         log_path = Path(work_dir) / f"stage-{index}.log"
                         command = [
                             sys.executable, "--backend", script_name, "--log-file", str(log_path),
-                            str(input_save), "--output", str(output_save),
+                            str(input_save), "--output", str(output_save), *extra_args,
                         ]
                     else:
                         command = [
                             sys.executable, "-u", str(APP_DIR / script_name),
-                            str(input_save), "--output", str(output_save),
+                            str(input_save), "--output", str(output_save), *extra_args,
                         ]
                     self.events.put(("log", "$ " + subprocess.list2cmdline(command)))
                     if frozen:
@@ -297,12 +309,20 @@ class DraftClassApp:
                         raise RuntimeError(f"The step failed with exit code {return_code}.")
                 if not completed_save.is_file() or completed_save.stat().st_size == 0:
                     raise RuntimeError("The final save was not created or is empty.")
+                if not report_path.is_file() or report_path.stat().st_size == 0:
+                    raise RuntimeError("The prospect scouting report was not created or is empty.")
                 if output.exists():
                     raise RuntimeError(
                         f"A file named DraftClass appeared during the run; it was not overwritten:\n{output}"
                     )
                 shutil.move(str(completed_save), str(output))
-                self.events.put(("success", str(output)))
+                report_output = source.parent / "DraftClass-Scouting-Report.csv"
+                suffix = 2
+                while report_output.exists():
+                    report_output = source.parent / f"DraftClass-Scouting-Report-{suffix}.csv"
+                    suffix += 1
+                shutil.move(str(report_path), str(report_output))
+                self.events.put(("success", json.dumps({"save": str(output), "report": str(report_output)})))
         except Exception as exc:
             self.events.put(("error", str(exc)))
         finally:
@@ -325,8 +345,14 @@ class DraftClassApp:
                 if kind == "log":
                     self.append_log(message)
                 elif kind == "success":
-                    self.append_log(f"\nDraftClass created: {message}")
-                    messagebox.showinfo("DraftClass created", f"Your new save is ready:\n{message}", parent=self.root)
+                    result = json.loads(message)
+                    self.append_log(f"\nDraftClass created: {result['save']}")
+                    self.append_log(f"Scouting report created: {result['report']}")
+                    messagebox.showinfo(
+                        "DraftClass created",
+                        f"Your new save is ready:\n{result['save']}\n\nScouting report:\n{result['report']}",
+                        parent=self.root,
+                    )
                 elif kind == "error":
                     self.append_log(f"\nERROR: {message}")
                     messagebox.showerror("Could not create DraftClass", message, parent=self.root)
@@ -436,6 +462,8 @@ def run_backend_mode() -> None:
         from randomize_prospects import main as run_stage
     elif stage_name == "randomize_heights.py":
         from randomize_heights import main as run_stage
+    elif stage_name == "rank_draft_class.py":
+        from rank_draft_class import main as run_stage
     else:
         raise SystemExit(f"Unknown backend stage: {stage_name}")
     run_stage()

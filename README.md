@@ -9,7 +9,15 @@ A small Windows desktop app that takes a Madden franchise save and creates a sep
 3. Run `python app.py` or `npm start`.
 4. Select a franchise save and choose **Create DraftClass**.
 
-The app randomizes prospect ratings and mapped weights, then randomizes QB and WR prospect heights. Draft-order changes are not included yet. The app refuses to overwrite an existing `DraftClass` file. Temporary working files are removed after each run.
+The app randomizes prospect ratings and selected mapped weights, then randomizes QB and WR prospect heights. It scores the class using position-specific NFL skills, physical upside, generated fictional college production, and program context. It writes each prospect's ranking and projected round/pick into the franchise save, updates the stored draft-board evaluations and all 32 team boards, and creates a scouting report beside the output save. The selected franchise save is never modified, and the app refuses to overwrite an existing `DraftClass` file.
+
+The scouting model uses 45% NFL-translatable skills, 30% physical upside, 15% college production, and 10% college program context. It ignores Madden overall and development traits. Generated season statistics depend on ratings, position, estimated role/opportunities, and program context. First-round quarterbacks receive at least 70 in short and medium accuracy. Within each round's position targets, prospects follow the model's final scores, with NFL skills, physical upside, then context-adjusted production as tie-breakers.
+
+The draft follows the document's average position mix by round, rounded to whole selections while keeping 32 picks in each round. The source table's rounds 3-7 add up to more than 32, so those rows are normalized to 32 while preserving the listed proportions. Prospects are sorted by scouting score within each position target. The report includes the source average, normalized target, actual count, resulting draft rank, and separate score-only scouting rank.
+
+Fullbacks receive randomized rating profiles and the offensive change-of-direction cap. Kicker, punter, and long-snapper ratings are preserved because the document does not set ranges for them; they still receive separate position-specific scouting scores and valid draft ranks.
+
+Madden stores each player's college as a packed reference instead of a readable school name. By default, the report shows a stable college code and generated program-strength value for that code. You can add an entry to `college_programs.json` to provide a school name and strength when you know a code: `{"programs":{"0x80000732":{"name":"Example State","strength":72}}}`. Strength values are 0-100.
 
 ## Build a Windows executable
 
