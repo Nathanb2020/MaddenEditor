@@ -1,6 +1,6 @@
 # Madden Draft Class Builder
 
-A small Windows desktop app that takes a Madden franchise save and creates a separate save named `DraftClass` beside the selected file. The selected save is used as input and is not modified.
+A small Windows desktop app that takes a Madden franchise save and creates a separate save beside the selected file. The selected save is used as input and is not modified. New saves are named `CAREER-DRAFTCLASS1`, then `CAREER-DRAFTCLASS2`, `CAREER-DRAFTCLASS3`, and so on, using the first name not already in the folder.
 
 ## Start
 
@@ -9,7 +9,7 @@ A small Windows desktop app that takes a Madden franchise save and creates a sep
 3. Run `python app.py` or `npm start`.
 4. Select a franchise save and choose **Create DraftClass**.
 
-The app randomizes prospect ratings and selected mapped weights, then randomizes QB and WR prospect heights. It scores the class using position-specific NFL skills, physical upside, generated fictional college production, and program context. It writes each prospect's ranking and projected round/pick into the franchise save, updates the stored draft-board evaluations and all 32 team boards, and creates a scouting report beside the output save. The selected franchise save is never modified, and the app refuses to overwrite an existing `DraftClass` file.
+The app randomizes prospect ratings and selected mapped weights, then randomizes QB and WR prospect heights. It scores the class using position-specific NFL skills, physical upside, generated fictional college production, and program context. It writes each prospect's ranking and projected round/pick into the franchise save, updates the stored draft-board evaluations and all 32 team boards, and creates a scouting report beside the output save. The selected franchise save is never modified, and existing `CAREER-DRAFTCLASS#` files are preserved while the app chooses the next unused number.
 
 The scouting model uses 45% NFL-translatable skills, 30% physical upside, 15% college production, and 10% college program context. It ignores Madden overall and development traits. Generated season statistics depend on ratings, position, estimated role/opportunities, and program context. First-round quarterbacks receive at least 70 in short and medium accuracy. Within each round's position targets, prospects follow the model's final scores, with NFL skills, physical upside, then context-adjusted production as tie-breakers.
 
@@ -28,7 +28,7 @@ Run `.\build_exe.ps1` in PowerShell. It creates `dist\DraftClassBuilder.exe` as 
 The executable has a **Check for updates** button that checks the latest GitHub Release and can download and install a newer build. To enable it:
 
 1. Set `github_repo` in `update_config.json` to your GitHub `owner/repository`, and set `version` to the current app version.
-2. Run `build_exe.ps1` and publish `dist\DraftClassBuilder.exe` as an asset in a GitHub Release. Name the release tag with the same version and a `v` prefix, such as `v1.0.1`.
+2. Run `build_exe.ps1` and publish `dist\DraftClassBuilder.exe` as an asset in a GitHub Release. Name the release tag with the same version and a `v` prefix, such as `v1.0.2`.
 3. For each fix, increase `version`, rebuild, and publish the new executable as `DraftClassBuilder.exe` on a new release. Your friend clicks **Check for updates** in the app.
 
 The updater requires a public GitHub repository and a writable folder for the executable. The configured repository is `Nathanb2020/MaddenEditor`. It keeps a backup while replacing the running executable and restores it if the replacement fails. The updater compares numeric versions such as `1.0.2`; keep release tags in that format.

@@ -2,6 +2,7 @@
 """Small desktop UI for creating a randomized Madden draft-class save."""
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
 import os
@@ -27,6 +28,41 @@ if NODE_DIR.is_dir():
     os.environ["PATH"] = str(NODE_DIR) + os.pathsep + os.environ.get("PATH", "")
 
 
+def next_draft_save_path(directory: Path) -> Path:
+    """Return the first unused CAREER-DRAFTCLASS save path in a directory."""
+    index = 1
+    while True:
+        candidate = directory / f"CAREER-DRAFTCLASS{index}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def move_without_overwrite(source: Path, destination: Path) -> None:
+    """Move a file without replacing a destination created by another process."""
+    try:
+        os.rename(source, destination)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+
+    # The system temp directory may be on another drive. Create the destination
+    # exclusively before copying so a concurrent save cannot be overwritten.
+    reserved = False
+    try:
+        with destination.open("xb") as output_file:
+            reserved = True
+            with source.open("rb") as input_file:
+                shutil.copyfileobj(input_file, output_file)
+        shutil.copystat(source, destination)
+        source.unlink()
+    except Exception:
+        if reserved:
+            destination.unlink(missing_ok=True)
+        raise
+
+
 class DraftClassApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -50,7 +86,7 @@ class DraftClassApp:
         ttk.Label(frame, text="Madden Draft Class Builder", font=("Segoe UI", 18, "bold")).pack(anchor="w")
         ttk.Label(
             frame,
-            text=("Select a franchise save. The app creates a separate DraftClass save "
+            text=("Select a franchise save. The app creates a separate CAREER-DRAFTCLASS save "
                   "beside it and leaves the selected save unchanged."),
             wraplength=650,
         ).pack(anchor="w", pady=(6, 18))
@@ -92,7 +128,7 @@ class DraftClassApp:
         )
         if path:
             self.save_path.set(path)
-            self.output_path.set(str(Path(path).resolve().parent / "DraftClass"))
+            self.output_path.set(str(next_draft_save_path(Path(path).resolve().parent)))
 
     def append_log(self, message: str) -> None:
         self.log.configure(state="normal")
@@ -204,18 +240,8 @@ class DraftClassApp:
             messagebox.showerror("Save not found", f"Could not find this file:\n{source}", parent=self.root)
             return
 
-        output = source.parent / "DraftClass"
+        output = next_draft_save_path(source.parent)
         self.output_path.set(str(output))
-        if os.path.normcase(str(source)) == os.path.normcase(str(output)):
-            messagebox.showerror("Choose the original save", "The selected file is already named DraftClass.", parent=self.root)
-            return
-        if output.exists():
-            messagebox.showerror(
-                "DraftClass already exists",
-                f"The app will not overwrite an existing save. Move or rename this file, then try again:\n{output}",
-                parent=self.root,
-            )
-            return
         if source.stat().st_size == 0:
             messagebox.showerror("Empty save", "The selected file is empty.", parent=self.root)
             return
@@ -311,11 +337,12 @@ class DraftClassApp:
                     raise RuntimeError("The final save was not created or is empty.")
                 if not report_path.is_file() or report_path.stat().st_size == 0:
                     raise RuntimeError("The prospect scouting report was not created or is empty.")
-                if output.exists():
-                    raise RuntimeError(
-                        f"A file named DraftClass appeared during the run; it was not overwritten:\n{output}"
-                    )
-                shutil.move(str(completed_save), str(output))
+                while True:
+                    try:
+                        move_without_overwrite(completed_save, output)
+                        break
+                    except FileExistsError:
+                        output = next_draft_save_path(source.parent)
                 report_output = source.parent / "DraftClass-Scouting-Report.csv"
                 suffix = 2
                 while report_output.exists():
@@ -346,16 +373,17 @@ class DraftClassApp:
                     self.append_log(message)
                 elif kind == "success":
                     result = json.loads(message)
-                    self.append_log(f"\nDraftClass created: {result['save']}")
+                    self.output_path.set(result["save"])
+                    self.append_log(f"\nDraft class created: {result['save']}")
                     self.append_log(f"Scouting report created: {result['report']}")
                     messagebox.showinfo(
-                        "DraftClass created",
+                        "Draft class created",
                         f"Your new save is ready:\n{result['save']}\n\nScouting report:\n{result['report']}",
                         parent=self.root,
                     )
                 elif kind == "error":
                     self.append_log(f"\nERROR: {message}")
-                    messagebox.showerror("Could not create DraftClass", message, parent=self.root)
+                    messagebox.showerror("Could not create draft class", message, parent=self.root)
                 elif kind == "update_current":
                     self.update_checking = False
                     self.update_button.configure(state="normal", text="Check for updates")
