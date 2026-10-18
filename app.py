@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""Small desktop UI for creating a randomized Madden draft-class save."""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+from pathlib import Path
+import queue
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+
+APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+CONFIG_PATH = APP_DIR / "update_config.json"
+NODE_DIR = APP_DIR / "node"
+if NODE_DIR.is_dir():
+    os.environ["PATH"] = str(NODE_DIR) + os.pathsep + os.environ.get("PATH", "")
+
+
+class DraftClassApp:
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.root.title("Madden Draft Class Builder")
+        self.root.minsize(700, 540)
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+        self.save_path = tk.StringVar()
+        self.output_path = tk.StringVar(value="Choose a save file to see the output location.")
+        self.events: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.running = False
+        self.update_checking = False
+
+        self.build_ui()
+        self.root.after(100, self.poll_events)
+
+    def build_ui(self) -> None:
+        frame = ttk.Frame(self.root, padding=20)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Madden Draft Class Builder", font=("Segoe UI", 18, "bold")).pack(anchor="w")
+        ttk.Label(
+            frame,
+            text=("Select a franchise save. The app creates a separate DraftClass save "
+                  "beside it and leaves the selected save unchanged."),
+            wraplength=650,
+        ).pack(anchor="w", pady=(6, 18))
+
+        ttk.Label(frame, text="Franchise save").pack(anchor="w")
+        select_row = ttk.Frame(frame)
+        select_row.pack(fill="x", pady=(4, 12))
+        self.save_entry = ttk.Entry(select_row, textvariable=self.save_path)
+        self.save_entry.pack(side="left", fill="x", expand=True)
+        self.browse_button = ttk.Button(select_row, text="Browse…", command=self.browse)
+        self.browse_button.pack(side="left", padx=(8, 0))
+
+        ttk.Label(frame, text="New save location").pack(anchor="w")
+        ttk.Label(frame, textvariable=self.output_path, wraplength=650).pack(anchor="w", pady=(4, 14))
+
+        self.create_button = ttk.Button(frame, text="Create DraftClass", command=self.create)
+        action_row = ttk.Frame(frame)
+        action_row.pack(anchor="w")
+        self.create_button.pack(in_=action_row, side="left")
+        self.update_button = ttk.Button(action_row, text="Check for updates", command=self.check_for_updates)
+        self.update_button.pack(side="left", padx=(8, 0))
+
+        ttk.Label(frame, text="Progress").pack(anchor="w", pady=(18, 4))
+        self.log = scrolledtext.ScrolledText(frame, height=12, state="disabled", wrap="word", font=("Consolas", 9))
+        self.log.pack(fill="both", expand=True)
+
+        ttk.Label(
+            frame,
+            text="This runs the ratings/weight stage followed by QB/WR height randomization. "
+                 "Draft-order updates are not included yet.",
+            wraplength=650,
+        ).pack(anchor="w", pady=(10, 0))
+
+    def browse(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select a Madden franchise save",
+            filetypes=[("Madden franchise saves", "*"), ("All files", "*.*")],
+        )
+        if path:
+            self.save_path.set(path)
+            self.output_path.set(str(Path(path).resolve().parent / "DraftClass"))
+
+    def append_log(self, message: str) -> None:
+        self.log.configure(state="normal")
+        self.log.insert("end", message + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    @staticmethod
+    def update_settings() -> tuple[str, str]:
+        try:
+            settings = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            version = str(settings.get("version", "")).strip()
+            repository = str(settings.get("github_repo", "")).strip()
+        except (OSError, json.JSONDecodeError):
+            return "", ""
+        return version, repository
+
+    def check_for_updates(self) -> None:
+        if self.update_checking:
+            return
+        version, repository = self.update_settings()
+        if not repository or "/" not in repository:
+            messagebox.showinfo(
+                "Updates not configured",
+                "Set github_repo in update_config.json to your GitHub owner/repository, then rebuild the app.",
+                parent=self.root,
+            )
+            return
+        if not getattr(sys, "frozen", False):
+            messagebox.showinfo(
+                "Updates available in the executable",
+                "The update flow is for the packaged Windows executable. Build DraftClassBuilder.exe to use it.",
+                parent=self.root,
+            )
+            return
+        self.update_checking = True
+        self.update_button.configure(state="disabled", text="Checking…")
+        threading.Thread(target=self.fetch_update, args=(version, repository), daemon=True).start()
+
+    def fetch_update(self, current_version: str, repository: str) -> None:
+        try:
+            request = Request(
+                f"https://api.github.com/repos/{repository}/releases/latest",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "DraftClassBuilder-Updater"},
+            )
+            with urlopen(request, timeout=20) as response:
+                release = json.loads(response.read().decode("utf-8"))
+            latest_version = str(release.get("tag_name", "")).strip().lstrip("v")
+            assets = release.get("assets", [])
+            asset = next((item for item in assets if item.get("name") == "DraftClassBuilder.exe"), None)
+            if not latest_version or not asset:
+                raise RuntimeError("The latest GitHub release must have a version tag and DraftClassBuilder.exe asset.")
+            if compare_versions(latest_version, current_version) <= 0:
+                self.events.put(("update_current", latest_version))
+                return
+            self.events.put(("update_available", json.dumps({
+                "version": latest_version,
+                "url": asset.get("browser_download_url", ""),
+                "notes": str(release.get("body", ""))[:1500],
+            })))
+        except (HTTPError, URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
+            self.events.put(("update_error", str(exc)))
+
+    def download_and_install_update(self, update: dict[str, str]) -> None:
+        try:
+            url = update.get("url", "")
+            if not url.startswith("https://github.com/"):
+                raise RuntimeError("The release download link is missing or is not a GitHub HTTPS link.")
+            request = Request(url, headers={"User-Agent": "DraftClassBuilder-Updater"})
+            with urlopen(request, timeout=60) as response:
+                payload = response.read()
+            if len(payload) < 1024 or not payload.startswith(b"MZ"):
+                raise RuntimeError("The downloaded file does not look like a Windows executable.")
+            install_path = Path(sys.executable).resolve()
+            with tempfile.NamedTemporaryFile(prefix="DraftClassBuilder-update-", suffix=".exe", delete=False) as staged:
+                staged.write(payload)
+                staged_path = Path(staged.name)
+            script_path = create_update_script(install_path, staged_path, os.getpid())
+            subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self.root.after(0, self.root.destroy)
+        except (HTTPError, URLError, TimeoutError, OSError, RuntimeError) as exc:
+            self.events.put(("update_error", str(exc)))
+
+    def accept_update(self, update_json: str) -> None:
+        update = json.loads(update_json)
+        notes = update.get("notes", "").strip()
+        details = f"Version {update['version']} is available. Download and install it now?"
+        if notes:
+            details += f"\n\nRelease notes:\n{notes}"
+        if not messagebox.askyesno("Update available", details, parent=self.root):
+            return
+        self.update_button.configure(state="disabled", text="Downloading…")
+        threading.Thread(target=self.download_and_install_update, args=(update,), daemon=True).start()
+
+    def create(self) -> None:
+        source_text = self.save_path.get().strip()
+        if not source_text:
+            messagebox.showerror("Select a save", "Browse to a franchise save file first.", parent=self.root)
+            return
+
+        source = Path(source_text).expanduser().resolve()
+        if not source.is_file():
+            messagebox.showerror("Save not found", f"Could not find this file:\n{source}", parent=self.root)
+            return
+
+        output = source.parent / "DraftClass"
+        self.output_path.set(str(output))
+        if os.path.normcase(str(source)) == os.path.normcase(str(output)):
+            messagebox.showerror("Choose the original save", "The selected file is already named DraftClass.", parent=self.root)
+            return
+        if output.exists():
+            messagebox.showerror(
+                "DraftClass already exists",
+                f"The app will not overwrite an existing save. Move or rename this file, then try again:\n{output}",
+                parent=self.root,
+            )
+            return
+        if source.stat().st_size == 0:
+            messagebox.showerror("Empty save", "The selected file is empty.", parent=self.root)
+            return
+
+        missing = self.missing_requirements()
+        if missing:
+            messagebox.showerror("Requirements missing", missing, parent=self.root)
+            return
+
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+        self.set_running(True)
+        threading.Thread(target=self.run_pipeline, args=(source, output), daemon=True).start()
+
+    @staticmethod
+    def missing_requirements() -> str | None:
+        missing = []
+        if shutil.which("node") is None:
+            missing.append("Node.js is not installed or not available on PATH.")
+        if importlib.util.find_spec("numpy") is None:
+            missing.append("NumPy is missing. Install it with: python -m pip install -r requirements.txt")
+        if not (APP_DIR / "node_modules" / "madden-franchise").exists():
+            missing.append("The Madden franchise package is missing. Install it with: npm install")
+        for script in ("randomize_prospects.py", "randomize_heights.py", "export.mjs", "apply.mjs"):
+            if not (APP_DIR / script).is_file():
+                missing.append(f"Required app file is missing: {script}")
+        return "\n\n".join(missing) or None
+
+    def run_pipeline(self, source: Path, output: Path) -> None:
+        try:
+            with tempfile.TemporaryDirectory(prefix="madden-draftclass-") as work_dir:
+                stage1 = Path(work_dir) / "Stage1"
+                completed_save = Path(work_dir) / "DraftClass"
+                commands = [
+                    ("Randomizing ratings and mapped weights…", "randomize_prospects.py", source, stage1),
+                    ("Randomizing QB and WR heights…", "randomize_heights.py", stage1, completed_save),
+                ]
+                frozen = getattr(sys, "frozen", False)
+                for index, (label, script_name, input_save, output_save) in enumerate(commands, start=1):
+                    self.events.put(("log", label))
+                    if frozen:
+                        log_path = Path(work_dir) / f"stage-{index}.log"
+                        command = [
+                            sys.executable, "--backend", script_name, "--log-file", str(log_path),
+                            str(input_save), "--output", str(output_save),
+                        ]
+                    else:
+                        command = [
+                            sys.executable, "-u", str(APP_DIR / script_name),
+                            str(input_save), "--output", str(output_save),
+                        ]
+                    self.events.put(("log", "$ " + subprocess.list2cmdline(command)))
+                    if frozen:
+                        result = subprocess.Popen(
+                            command, cwd=work_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        )
+                        offset = 0
+                        while result.poll() is None:
+                            offset = self.read_backend_log(log_path, offset)
+                            time.sleep(0.1)
+                        self.read_backend_log(log_path, offset)
+                        return_code = result.returncode
+                    else:
+                        result = subprocess.Popen(
+                            command,
+                            cwd=work_dir,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            bufsize=1,
+                        )
+                        assert result.stdout is not None
+                        for line in result.stdout:
+                            self.events.put(("log", line.rstrip()))
+                        return_code = result.wait()
+                    if return_code != 0:
+                        raise RuntimeError(f"The step failed with exit code {return_code}.")
+                if not completed_save.is_file() or completed_save.stat().st_size == 0:
+                    raise RuntimeError("The final save was not created or is empty.")
+                if output.exists():
+                    raise RuntimeError(
+                        f"A file named DraftClass appeared during the run; it was not overwritten:\n{output}"
+                    )
+                shutil.move(str(completed_save), str(output))
+                self.events.put(("success", str(output)))
+        except Exception as exc:
+            self.events.put(("error", str(exc)))
+        finally:
+            self.events.put(("finished", ""))
+
+    def read_backend_log(self, path: Path, offset: int) -> int:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as log_file:
+                log_file.seek(offset)
+                for line in log_file:
+                    self.events.put(("log", line.rstrip()))
+                return log_file.tell()
+        except FileNotFoundError:
+            return offset
+
+    def poll_events(self) -> None:
+        try:
+            while True:
+                kind, message = self.events.get_nowait()
+                if kind == "log":
+                    self.append_log(message)
+                elif kind == "success":
+                    self.append_log(f"\nDraftClass created: {message}")
+                    messagebox.showinfo("DraftClass created", f"Your new save is ready:\n{message}", parent=self.root)
+                elif kind == "error":
+                    self.append_log(f"\nERROR: {message}")
+                    messagebox.showerror("Could not create DraftClass", message, parent=self.root)
+                elif kind == "update_current":
+                    self.update_checking = False
+                    self.update_button.configure(state="normal", text="Check for updates")
+                    messagebox.showinfo("Up to date", f"You have the latest version ({message}).", parent=self.root)
+                elif kind == "update_available":
+                    self.update_checking = False
+                    self.update_button.configure(state="normal", text="Check for updates")
+                    self.accept_update(message)
+                elif kind == "update_error":
+                    self.update_checking = False
+                    self.update_button.configure(state="normal", text="Check for updates")
+                    messagebox.showerror("Update failed", message, parent=self.root)
+                elif kind == "finished":
+                    self.set_running(False)
+        except queue.Empty:
+            pass
+        self.root.after(100, self.poll_events)
+
+    def set_running(self, running: bool) -> None:
+        self.running = running
+        state = "disabled" if running else "normal"
+        self.save_entry.configure(state=state)
+        self.browse_button.configure(state=state)
+        self.create_button.configure(state=state)
+        self.update_button.configure(state="disabled" if running or self.update_checking else "normal")
+        self.create_button.configure(text="Creating…" if running else "Create DraftClass")
+
+    def close(self) -> None:
+        if self.running:
+            messagebox.showwarning("Still working", "Wait for the save creation to finish before closing.", parent=self.root)
+            return
+        self.root.destroy()
+
+
+def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "--backend":
+        run_backend_mode()
+        return
+    root = tk.Tk()
+    DraftClassApp(root)
+    root.mainloop()
+
+
+def compare_versions(left: str, right: str) -> int:
+    """Compare numeric dot-separated release versions, ignoring a leading v."""
+    def parts(value: str) -> tuple[int, ...]:
+        value = value.strip().lstrip("v")
+        pieces = value.split(".")
+        if not pieces or any(not piece.isdigit() for piece in pieces):
+            raise ValueError(f"Invalid app version: {value}")
+        return tuple(int(piece) for piece in pieces)
+
+    a, b = parts(left), parts(right)
+    length = max(len(a), len(b))
+    a += (0,) * (length - len(a))
+    b += (0,) * (length - len(b))
+    return (a > b) - (a < b)
+
+
+def create_update_script(target: Path, staged: Path, process_id: int) -> Path:
+    script = r'''param([int]$ProcessId, [string]$Target, [string]$Staged)
+$ErrorActionPreference = 'Stop'
+$backup = "$Target.previous"
+try {
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($process) { $process.WaitForExit() }
+    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
+    Move-Item -LiteralPath $Target -Destination $backup
+    try {
+        Move-Item -LiteralPath $Staged -Destination $Target
+    } catch {
+        Move-Item -LiteralPath $backup -Destination $Target -Force
+        throw
+    }
+    Start-Process -FilePath $Target
+    Remove-Item -LiteralPath $backup -Force
+} catch {
+    if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $Target)) {
+        Move-Item -LiteralPath $backup -Destination $Target -Force
+    }
+    exit 1
+} finally {
+    if (Test-Path -LiteralPath $Staged) { Remove-Item -LiteralPath $Staged -Force }
+}'''
+    script_path = Path(tempfile.gettempdir()) / f"DraftClassBuilder-updater-{process_id}.ps1"
+    script_path.write_text(script, encoding="utf-8")
+    return script_path
+
+
+def run_backend_mode() -> None:
+    if len(sys.argv) < 3:
+        raise SystemExit("Missing backend stage.")
+    stage_name = sys.argv[2]
+    backend_args = sys.argv[3:]
+    if backend_args and backend_args[0] == "--log-file":
+        if len(backend_args) < 2:
+            raise SystemExit("Missing backend log file path.")
+        log_file = open(backend_args[1], "w", encoding="utf-8", errors="replace", buffering=1)
+        sys.stdout = log_file
+        sys.stderr = log_file
+        backend_args = backend_args[2:]
+    sys.argv = [stage_name, *backend_args]
+    if stage_name == "randomize_prospects.py":
+        from randomize_prospects import main as run_stage
+    elif stage_name == "randomize_heights.py":
+        from randomize_heights import main as run_stage
+    else:
+        raise SystemExit(f"Unknown backend stage: {stage_name}")
+    run_stage()
+
+
+if __name__ == "__main__":
+    main()
