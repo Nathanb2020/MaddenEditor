@@ -208,7 +208,12 @@ class DraftClassApp:
                 staged_path = Path(staged.name)
             script_path = create_update_script(install_path, staged_path, os.getpid())
             subprocess.Popen(
-                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                [
+                    "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                    "-ProcessId", str(os.getpid()),
+                    "-Target", str(install_path),
+                    "-Staged", str(staged_path),
+                ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

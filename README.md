@@ -28,7 +28,9 @@ Run `.\build_exe.ps1` in PowerShell. It creates `dist\DraftClassBuilder.exe` as 
 The executable has a **Check for updates** button that checks the latest GitHub Release and can download and install a newer build. To enable it:
 
 1. Set `github_repo` in `update_config.json` to your GitHub `owner/repository`, and set `version` to the current app version.
-2. Run `build_exe.ps1` and publish `dist\DraftClassBuilder.exe` as an asset in a GitHub Release. Name the release tag with the same version and a `v` prefix, such as `v1.0.2`.
+2. Run `build_exe.ps1` and publish `dist\DraftClassBuilder.exe` as an asset in a GitHub Release. Name the release tag with the same version and a `v` prefix, such as `v1.0.3`.
 3. For each fix, increase `version`, rebuild, and publish the new executable as `DraftClassBuilder.exe` on a new release. Your friend clicks **Check for updates** in the app.
+
+Versions before `1.0.3` launch the update script without its required file paths and cannot update themselves. Replace those executables with the `v1.0.3` download once; later versions can update through the button.
 
 The updater requires a public GitHub repository and a writable folder for the executable. The configured repository is `Nathanb2020/MaddenEditor`. It keeps a backup while replacing the running executable and restores it if the replacement fails. The updater compares numeric versions such as `1.0.2`; keep release tags in that format.
