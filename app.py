@@ -282,6 +282,7 @@ class DraftClassApp:
         if not (APP_DIR / "node_modules" / "madden-franchise").exists():
             missing.append("The Madden franchise package is missing. Install it with: npm install")
         for script in ("randomize_prospects.py", "randomize_heights.py", "rank_draft_class.py",
+                       "floor_active_players.py",
                        "export.mjs", "apply.mjs", "export_draft_class.mjs", "apply_draft_order.mjs",
                        "college_programs.json"):
             if not (APP_DIR / script).is_file():
@@ -293,6 +294,7 @@ class DraftClassApp:
             with tempfile.TemporaryDirectory(prefix="madden-draftclass-") as work_dir:
                 stage1 = Path(work_dir) / "Stage1"
                 stage2 = Path(work_dir) / "Stage2"
+                ranked_save = Path(work_dir) / "RankedDraftClass"
                 completed_save = Path(work_dir) / "DraftClass"
                 report_path = Path(work_dir) / "ScoutingReport.csv"
                 seed = random.SystemRandom().randrange(1, 10 ** 9)
@@ -303,7 +305,9 @@ class DraftClassApp:
                     ("Randomizing QB and WR heights…", "randomize_heights.py", stage1, stage2,
                      ["--seed", str(seed ^ 0x45A9)]),
                     ("Scoring prospects and writing the new draft order…", "rank_draft_class.py", stage2,
-                     completed_save, ["--seed", str(seed ^ 0x61C3), "--report", str(report_path)]),
+                     ranked_save, ["--seed", str(seed ^ 0x61C3), "--report", str(report_path)]),
+                    ("Raising active players and free agents to position minimums…",
+                     "floor_active_players.py", ranked_save, completed_save, []),
                 ]
                 frozen = getattr(sys, "frozen", False)
                 for index, (label, script_name, input_save, output_save, extra_args) in enumerate(commands, start=1):
@@ -554,6 +558,8 @@ def run_backend_mode() -> None:
         from randomize_heights import main as run_stage
     elif stage_name == "rank_draft_class.py":
         from rank_draft_class import main as run_stage
+    elif stage_name == "floor_active_players.py":
+        from floor_active_players import main as run_stage
     else:
         raise SystemExit(f"Unknown backend stage: {stage_name}")
     run_stage()
