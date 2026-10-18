@@ -478,6 +478,10 @@ try {
     Move-Item -LiteralPath $Target -Destination $backup
     Move-Item -LiteralPath $Staged -Destination $Target
     $env:DRAFTCLASSBUILDER_UPDATE_READY = $readyMarker
+    # The updater inherits the old one-file app's private PyInstaller environment.
+    # Force the replacement to unpack into a fresh _MEI directory after the old
+    # app has exited and its extraction directory is cleaned up.
+    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
     $updatedProcess = Start-Process -FilePath $Target -PassThru
     $deadline = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $deadline) {
@@ -505,6 +509,7 @@ try {
             Remove-Item Env:\DRAFTCLASSBUILDER_UPDATE_READY -ErrorAction SilentlyContinue
             if (Test-Path -LiteralPath $Target) { Remove-Item -LiteralPath $Target -Force }
             Move-Item -LiteralPath $backup -Destination $Target -Force
+            $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
             Start-Process -FilePath $Target
         } catch { $failure += " Rollback also failed: $($_.Exception.Message)" }
     }
@@ -521,6 +526,7 @@ try {
     exit 1
 } finally {
     Remove-Item Env:\DRAFTCLASSBUILDER_UPDATE_READY -ErrorAction SilentlyContinue
+    Remove-Item Env:\PYINSTALLER_RESET_ENVIRONMENT -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $readyMarker) { Remove-Item -LiteralPath $readyMarker -Force }
     if (Test-Path -LiteralPath $Staged) { Remove-Item -LiteralPath $Staged -Force }
 }'''
