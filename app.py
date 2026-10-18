@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import importlib.util
 import json
 import os
@@ -175,6 +176,8 @@ class DraftClassApp:
             self.events.put(("update_available", json.dumps({
                 "version": latest_version,
                 "url": asset.get("browser_download_url", ""),
+                "size": str(asset.get("size") or ""),
+                "digest": str(asset.get("digest") or ""),
                 "notes": str(release.get("body", ""))[:1500],
             })))
         except (HTTPError, URLError, TimeoutError, OSError, ValueError, RuntimeError) as exc:
@@ -188,6 +191,25 @@ class DraftClassApp:
             request = Request(url, headers={"User-Agent": "DraftClassBuilder-Updater"})
             with urlopen(request, timeout=60) as response:
                 payload = response.read()
+            expected_size = update.get("size", "").strip()
+            if expected_size:
+                try:
+                    parsed_expected_size = int(expected_size)
+                except ValueError as exc:
+                    raise RuntimeError("The release returned an invalid update file size.") from exc
+                if len(payload) != parsed_expected_size:
+                    raise RuntimeError(
+                        f"The update download is incomplete ({len(payload)} of {parsed_expected_size} bytes). "
+                        "Your current app was not replaced."
+                    )
+            expected_digest = update.get("digest", "").strip().lower()
+            if expected_digest:
+                algorithm, separator, expected_digest = expected_digest.partition(":")
+                if not separator or algorithm != "sha256":
+                    raise RuntimeError("The release returned an unsupported update checksum format.")
+                actual_digest = hashlib.sha256(payload).hexdigest()
+                if actual_digest != expected_digest:
+                    raise RuntimeError("The update file failed GitHub's SHA-256 check. Your current app was not replaced.")
             if len(payload) < 1024 or not payload.startswith(b"MZ"):
                 raise RuntimeError("The downloaded file does not look like a Windows executable.")
             install_path = Path(sys.executable).resolve()
@@ -413,6 +435,15 @@ def main() -> None:
         return
     root = tk.Tk()
     DraftClassApp(root)
+    startup_marker = os.environ.pop("DRAFTCLASSBUILDER_UPDATE_READY", "")
+    if startup_marker:
+        def signal_update_ready() -> None:
+            try:
+                Path(startup_marker).write_text("ready", encoding="ascii")
+            except OSError:
+                pass
+
+        root.after(500, signal_update_ready)
     root.mainloop()
 
 
@@ -435,26 +466,62 @@ def compare_versions(left: str, right: str) -> int:
 def create_update_script(target: Path, staged: Path, process_id: int) -> Path:
     script = r'''param([int]$ProcessId, [string]$Target, [string]$Staged)
 $ErrorActionPreference = 'Stop'
-$backup = "$Target.previous"
+$backupSuffix = [guid]::NewGuid().ToString('N')
+$backup = "$Target.previous-$ProcessId-$backupSuffix"
+$readyMarker = Join-Path $env:TEMP "DraftClassBuilder-update-ready-$ProcessId"
+$log = Join-Path $env:TEMP "DraftClassBuilder-update-$ProcessId.log"
+$updatedProcess = $null
 try {
+    if (Test-Path -LiteralPath $readyMarker) { Remove-Item -LiteralPath $readyMarker -Force }
     $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($process) { $process.WaitForExit() }
-    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
     Move-Item -LiteralPath $Target -Destination $backup
-    try {
-        Move-Item -LiteralPath $Staged -Destination $Target
-    } catch {
-        Move-Item -LiteralPath $backup -Destination $Target -Force
-        throw
+    Move-Item -LiteralPath $Staged -Destination $Target
+    $env:DRAFTCLASSBUILDER_UPDATE_READY = $readyMarker
+    $updatedProcess = Start-Process -FilePath $Target -PassThru
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $readyMarker) {
+            Remove-Item -LiteralPath $backup -Force
+            exit 0
+        }
+        $updatedProcess.Refresh()
+        if ($updatedProcess.HasExited) {
+            throw "The updated app exited before confirming startup (exit code $($updatedProcess.ExitCode))."
+        }
+        Start-Sleep -Milliseconds 200
     }
-    Start-Process -FilePath $Target
-    Remove-Item -LiteralPath $backup -Force
+    throw 'The updated app did not confirm startup within 30 seconds.'
 } catch {
-    if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $Target)) {
-        Move-Item -LiteralPath $backup -Destination $Target -Force
+    $failure = $_.Exception.Message
+    if ($updatedProcess) {
+        try {
+            $updatedProcess.Refresh()
+            if (-not $updatedProcess.HasExited) { Stop-Process -Id $updatedProcess.Id -Force -ErrorAction SilentlyContinue }
+        } catch { }
     }
+    if (Test-Path -LiteralPath $backup) {
+        try {
+            Remove-Item Env:\DRAFTCLASSBUILDER_UPDATE_READY -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $Target) { Remove-Item -LiteralPath $Target -Force }
+            Move-Item -LiteralPath $backup -Destination $Target -Force
+            Start-Process -FilePath $Target
+        } catch { $failure += " Rollback also failed: $($_.Exception.Message)" }
+    }
+    try {
+        Add-Content -LiteralPath $log -Value "$(Get-Date -Format o) Update failed; previous executable restored when available. $failure"
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.MessageBox]::Show(
+            "The update could not start. The previous version was restored when possible.`n`nDetails: $failure`nLog: $log",
+            'Madden Draft Class Builder update',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        ) | Out-Null
+    } catch { }
     exit 1
 } finally {
+    Remove-Item Env:\DRAFTCLASSBUILDER_UPDATE_READY -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $readyMarker) { Remove-Item -LiteralPath $readyMarker -Force }
     if (Test-Path -LiteralPath $Staged) { Remove-Item -LiteralPath $Staged -Force }
 }'''
     script_path = Path(tempfile.gettempdir()) / f"DraftClassBuilder-updater-{process_id}.ps1"
