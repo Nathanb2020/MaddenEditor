@@ -78,6 +78,7 @@ class DraftClassApp:
 
         self.build_ui()
         self.root.after(100, self.poll_events)
+        self.root.after(500, self.check_for_updates)
 
     def build_ui(self) -> None:
         frame = ttk.Frame(self.root, padding=20)
@@ -102,12 +103,10 @@ class DraftClassApp:
         ttk.Label(frame, text="New save location").pack(anchor="w")
         ttk.Label(frame, textvariable=self.output_path, wraplength=650).pack(anchor="w", pady=(4, 14))
 
-        self.create_button = ttk.Button(frame, text="Create DraftClass", command=self.create)
         action_row = ttk.Frame(frame)
         action_row.pack(anchor="w")
-        self.create_button.pack(in_=action_row, side="left")
-        self.update_button = ttk.Button(action_row, text="Check for updates", command=self.check_for_updates)
-        self.update_button.pack(side="left", padx=(8, 0))
+        self.create_button = ttk.Button(action_row, text="Create DraftClass", command=self.create)
+        self.create_button.pack(side="left")
 
         ttk.Label(frame, text="Progress").pack(anchor="w", pady=(18, 4))
         self.log = scrolledtext.ScrolledText(frame, height=12, state="disabled", wrap="word", font=("Consolas", 9))
@@ -147,25 +146,14 @@ class DraftClassApp:
         return version, repository
 
     def check_for_updates(self) -> None:
-        if self.update_checking:
+        if self.update_checking or not getattr(sys, "frozen", False):
             return
         version, repository = self.update_settings()
         if not repository or "/" not in repository:
-            messagebox.showinfo(
-                "Updates not configured",
-                "Set github_repo in update_config.json to your GitHub owner/repository, then rebuild the app.",
-                parent=self.root,
-            )
-            return
-        if not getattr(sys, "frozen", False):
-            messagebox.showinfo(
-                "Updates available in the executable",
-                "The update flow is for the packaged Windows executable. Build DraftClassBuilder.exe to use it.",
-                parent=self.root,
-            )
+            self.append_log("Automatic update check skipped: GitHub repository is not configured.")
             return
         self.update_checking = True
-        self.update_button.configure(state="disabled", text="Checking…")
+        self.append_log("Checking for updates…")
         threading.Thread(target=self.fetch_update, args=(version, repository), daemon=True).start()
 
     def fetch_update(self, current_version: str, repository: str) -> None:
@@ -231,7 +219,7 @@ class DraftClassApp:
             details += f"\n\nRelease notes:\n{notes}"
         if not messagebox.askyesno("Update available", details, parent=self.root):
             return
-        self.update_button.configure(state="disabled", text="Downloading…")
+        self.append_log(f"Downloading version {update['version']}…")
         threading.Thread(target=self.download_and_install_update, args=(update,), daemon=True).start()
 
     def create(self) -> None:
@@ -391,16 +379,13 @@ class DraftClassApp:
                     messagebox.showerror("Could not create draft class", message, parent=self.root)
                 elif kind == "update_current":
                     self.update_checking = False
-                    self.update_button.configure(state="normal", text="Check for updates")
-                    messagebox.showinfo("Up to date", f"You have the latest version ({message}).", parent=self.root)
+                    self.append_log(f"App is up to date ({message}).")
                 elif kind == "update_available":
                     self.update_checking = False
-                    self.update_button.configure(state="normal", text="Check for updates")
                     self.accept_update(message)
                 elif kind == "update_error":
                     self.update_checking = False
-                    self.update_button.configure(state="normal", text="Check for updates")
-                    messagebox.showerror("Update failed", message, parent=self.root)
+                    self.append_log(f"Automatic update check failed: {message}")
                 elif kind == "finished":
                     self.set_running(False)
         except queue.Empty:
@@ -413,7 +398,6 @@ class DraftClassApp:
         self.save_entry.configure(state=state)
         self.browse_button.configure(state=state)
         self.create_button.configure(state=state)
-        self.update_button.configure(state="disabled" if running or self.update_checking else "normal")
         self.create_button.configure(text="Creating…" if running else "Create DraftClass")
 
     def close(self) -> None:
